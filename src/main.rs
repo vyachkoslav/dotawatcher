@@ -89,7 +89,9 @@ impl EventHandler for Handler {
 
     async fn ready(&self, ctx: Context, ready: Ready) {
         println!("{} is connected!", ready.user.name);
-        ctx.set_activity(Some(ActivityData::playing((*ACTIVITY_STRING).clone())));
+        let mut activity = ActivityData::custom("");
+        activity.state = Some((*ACTIVITY_STRING).clone());
+        ctx.set_activity(Some(activity));
         // main_loop(&ctx).await
     }
 }
