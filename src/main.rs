@@ -76,11 +76,23 @@ impl EventHandler for Handler {
                 activity.name = activity.details.unwrap_or("ничего".to_string());
                 activity.details = None;
             }
-            message = message.content(format!("{} {} и шпилит в {} {}", 
+            let large_text: String;
+            let small_text: String;
+            if let Some(assets) = activity.assets {
+                large_text = assets.large_text.unwrap_or_default();
+                small_text = assets.small_text.unwrap_or_default();
+            } else {
+                large_text = String::default();
+                small_text = String::default();
+            }
+            message = message.content(format!("{} {} и шпилит в {}\n{}\n{}\n{}", 
                     username, 
                     status, 
                     activity.name, 
-                    activity.details.unwrap_or("".to_string())));
+                    activity.details.unwrap_or_default(),
+                    large_text,
+                    small_text,
+            ));
         }
         if let Err(why) = ChannelId::new(*OUTPUT_CHANNEL).send_message(ctx.http(), message).await {
             eprintln!("Error sending activity message: {why:?}");
