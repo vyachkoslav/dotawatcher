@@ -14,9 +14,8 @@ lazy_static!{
     static ref TARGET_USER: u64 = env::var("TARGET_USER").expect("Expected TARGET_USER in the environment").parse().expect("TARGET_USER not a number");
     static ref EMOJI_ID: u64 = env::var("EMOJI_ID").expect("Expected EMOJI_ID in the environment").parse().expect("EMOJI_ID not a number");
     static ref EMOJI_NAME: String = env::var("EMOJI_NAME").expect("Expected EMOJI_NAME in the environment");
+    static ref ACTIVITY_STRING: String = env::var("ACTIVITY_STRING").expect("Expected ACTIVITY_STRING in the environment");
 }
-
-struct Handler;
 
 async fn main_loop(ctx: &Context) {
     let mut interval = time::interval(Duration::from_secs(5));
@@ -33,6 +32,8 @@ async fn main_loop(ctx: &Context) {
         interval.tick().await; 
     }
 }
+
+struct Handler;
 
 #[async_trait]
 impl EventHandler for Handler {
@@ -54,6 +55,7 @@ impl EventHandler for Handler {
             return;
         }
 
+        // Username is not received when user is offline, so requesting it
         let user: Option<User> = new_data.user.id.to_user(ctx.http()).await.ok();
         let username = if let Some(user) = user { user.name } else { "непонятно кто".to_string() };
 
@@ -75,6 +77,7 @@ impl EventHandler for Handler {
 
     async fn ready(&self, ctx: Context, ready: Ready) {
         println!("{} is connected!", ready.user.name);
+        ctx.set_activity(Some(ActivityData::playing((*ACTIVITY_STRING).clone())));
         // main_loop(&ctx).await
     }
 }
