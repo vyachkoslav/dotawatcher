@@ -1,11 +1,11 @@
 use std::env;
-use std::time::Duration;
 
 use lazy_static::lazy_static;
 
 use serenity::all::*;
 use serenity::async_trait;
 use tokio::time;
+use tokio::time::Duration;
 // use serenity::prelude::*;
 
 lazy_static!{
@@ -51,7 +51,7 @@ impl EventHandler for Handler {
     }
 
     async fn presence_update(&self, ctx: Context, new_data: Presence) {
-        if new_data.guild_id == Some(GuildId::new(*TARGET_GUILD)) {
+        if new_data.guild_id != Some(GuildId::new(*TARGET_GUILD)) {
             return;
         }
 
@@ -60,15 +60,27 @@ impl EventHandler for Handler {
         let username = if let Some(user) = user { user.name } else { "непонятно кто".to_string() };
 
         let mut message: CreateMessage = Default::default();
+        let status = match new_data.status {
+            OnlineStatus::Offline => "не в сети",
+            OnlineStatus::Idle => "спит",
+            OnlineStatus::Invisible => "в невидимке",
+            OnlineStatus::Online => "в сети",
+            OnlineStatus::DoNotDisturb => "просит не беспокоить",
+            _ => "непонятно"
+        };
         if new_data.activities.is_empty() {
-            let status = if new_data.status == OnlineStatus::Offline {
-                    "не в сети"
-                } else {
-                    "в сети"
-                };
             message = message.content(format!("{} теперь {}", username, status));
         } else {
-            message = message.content(format!("{} шпилит в {}", username, new_data.activities[0].name));
+            let mut activity = new_data.activities[0].clone();
+            if activity.kind == ActivityType::Custom {
+                activity.name = activity.details.unwrap_or("ничего".to_string());
+                activity.details = None;
+            }
+            message = message.content(format!("{} {} и шпилит в {} {}", 
+                    username, 
+                    status, 
+                    activity.name, 
+                    activity.details.unwrap_or("".to_string())));
         }
         if let Err(why) = ChannelId::new(*OUTPUT_CHANNEL).send_message(ctx.http(), message).await {
             eprintln!("Error sending activity message: {why:?}");
