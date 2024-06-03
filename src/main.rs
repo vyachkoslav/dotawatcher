@@ -16,23 +16,40 @@ macro_rules! get_string_for_status {
             OnlineStatus::Invisible => "в невидимке",
             OnlineStatus::Online => "в сети",
             OnlineStatus::DoNotDisturb => "просит не беспокоить",
-            _ => "непонятно"
+            _ => "непонятно",
         }
     };
 }
 
-lazy_static!{
-    static ref TARGET_GUILD: u64 = env::var("TARGET_SERVER").expect("Expected TARGET_SERVER in the environment").parse().expect("TARGET_SERVER not a number");
-    static ref OUTPUT_CHANNEL: u64 = env::var("OUTPUT_CHANNEL").expect("Expected OUTPUT_CHANNEL in the environment").parse().expect("OUTPUT_CHANNEL not a number");
-    static ref TARGET_USER: u64 = env::var("TARGET_USER").expect("Expected TARGET_USER in the environment").parse().expect("TARGET_USER not a number");
-    static ref EMOJI_ID: u64 = env::var("EMOJI_ID").expect("Expected EMOJI_ID in the environment").parse().expect("EMOJI_ID not a number");
-    static ref EMOJI_NAME: String = env::var("EMOJI_NAME").expect("Expected EMOJI_NAME in the environment");
-    static ref ACTIVITY_STRING: String = env::var("ACTIVITY_STRING").expect("Expected ACTIVITY_STRING in the environment");
+lazy_static! {
+    static ref TARGET_GUILD: u64 = env::var("TARGET_SERVER")
+        .expect("Expected TARGET_SERVER in the environment")
+        .parse()
+        .expect("TARGET_SERVER not a number");
+    static ref OUTPUT_CHANNEL: u64 = env::var("OUTPUT_CHANNEL")
+        .expect("Expected OUTPUT_CHANNEL in the environment")
+        .parse()
+        .expect("OUTPUT_CHANNEL not a number");
+    static ref TARGET_USER: u64 = env::var("TARGET_USER")
+        .expect("Expected TARGET_USER in the environment")
+        .parse()
+        .expect("TARGET_USER not a number");
+    static ref EMOJI_ID: u64 = env::var("EMOJI_ID")
+        .expect("Expected EMOJI_ID in the environment")
+        .parse()
+        .expect("EMOJI_ID not a number");
+    static ref EMOJI_NAME: String =
+        env::var("EMOJI_NAME").expect("Expected EMOJI_NAME in the environment");
+    static ref ACTIVITY_STRING: String =
+        env::var("ACTIVITY_STRING").expect("Expected ACTIVITY_STRING in the environment");
 }
 
 async fn main_loop(ctx: &Context) {
     let mut interval = time::interval(Duration::from_secs(5));
-    let mut user: User = UserId::new(*TARGET_USER).to_user(ctx.http()).await.expect("Can't get target user");
+    let mut user: User = UserId::new(*TARGET_USER)
+        .to_user(ctx.http())
+        .await
+        .expect("Can't get target user");
     loop {
         match user.refresh(ctx.http()).await {
             Ok(()) => (),
@@ -40,9 +57,9 @@ async fn main_loop(ctx: &Context) {
                 eprintln!("Can't refresh target user {err}");
                 interval.tick().await;
                 continue;
-            },
+            }
         };
-        interval.tick().await; 
+        interval.tick().await;
     }
 }
 
@@ -55,7 +72,7 @@ impl EventHandler for Handler {
             let reaction = ReactionType::Custom {
                 animated: false,
                 id: EmojiId::new(*EMOJI_ID),
-                name: Some((*EMOJI_NAME).to_string()), 
+                name: Some((*EMOJI_NAME).to_string()),
             };
             if let Err(why) = msg.react(&ctx.http, reaction).await {
                 eprintln!("Error reacting to message: {why:?}");
@@ -74,7 +91,7 @@ impl EventHandler for Handler {
             Err(err) => {
                 eprintln!("Couldn't receive user: {err:?}");
                 None
-            },
+            }
         };
 
         let username: &str = user.as_ref().map_or("непонятно кто", |u| &u.name);
@@ -83,9 +100,16 @@ impl EventHandler for Handler {
         let mut status: &str = get_string_for_status!(new_data.status);
 
         let device = new_data.client_status.map_or("", |device| {
-            if let Some(s) = device.mobile { status = get_string_for_status!(s); "с телефона" }
-            else if let Some(s) = device.web { status = get_string_for_status!(s); "с браузера" }
-            else { status = get_string_for_status!(new_data.status); "" }
+            if let Some(s) = device.mobile {
+                status = get_string_for_status!(s);
+                "с телефона"
+            } else if let Some(s) = device.web {
+                status = get_string_for_status!(s);
+                "с браузера"
+            } else {
+                status = get_string_for_status!(new_data.status);
+                ""
+            }
         });
 
         if new_data.activities.is_empty() {
@@ -98,7 +122,7 @@ impl EventHandler for Handler {
             if activity.kind == ActivityType::Custom {
                 activity_name = activity.details.as_deref().unwrap_or_default();
                 activity_details = &None;
-            } else { 
+            } else {
                 activity_name = &activity.name;
                 activity_details = &activity.details;
             }
@@ -113,17 +137,21 @@ impl EventHandler for Handler {
                 small_text = &None;
             }
 
-            message = message.content(format!("{} {} {} и шпилит в {}\n{}\n{}\n{}", 
-                    username, 
-                    status,
-                    device,
-                    activity_name, 
-                    activity_details.as_deref().unwrap_or_default(),
-                    large_text.as_deref().unwrap_or_default(),
-                    small_text.as_deref().unwrap_or_default(),
+            message = message.content(format!(
+                "{} {} {} и шпилит в {}\n{}\n{}\n{}",
+                username,
+                status,
+                device,
+                activity_name,
+                activity_details.as_deref().unwrap_or_default(),
+                large_text.as_deref().unwrap_or_default(),
+                small_text.as_deref().unwrap_or_default(),
             ));
         }
-        if let Err(why) = ChannelId::new(*OUTPUT_CHANNEL).send_message(ctx.http(), message).await {
+        if let Err(why) = ChannelId::new(*OUTPUT_CHANNEL)
+            .send_message(ctx.http(), message)
+            .await
+        {
             eprintln!("Error sending activity message: {why:?}");
         }
     }
@@ -147,8 +175,10 @@ async fn main() {
         | GatewayIntents::MESSAGE_CONTENT
         | GatewayIntents::GUILD_PRESENCES;
 
-    let mut client =
-        Client::builder(&token, intents).event_handler(Handler).await.expect("Err creating client");
+    let mut client = Client::builder(&token, intents)
+        .event_handler(Handler)
+        .await
+        .expect("Err creating client");
 
     if let Err(why) = client.start().await {
         eprintln!("Client error: {why:?}");
