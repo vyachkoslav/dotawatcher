@@ -1,48 +1,198 @@
+use std::collections::HashMap;
 use std::env;
 use std::sync::OnceLock;
 
-use serenity::all::*;
+use serenity::all::{
+    ActivityData, ActivityType, CacheHttp, ChannelId, Client, Context, CreateMessage, EmojiId,
+    EventHandler, GatewayIntents, GuildId, Message, OnlineStatus, Presence, ReactionType, Ready,
+    UserId,
+};
 use serenity::async_trait;
-use tokio::time;
-use tokio::time::Duration;
-// use serenity::prelude::*;
+
+use tokio::time::{ self, Duration };
+
+use anyhow::{ anyhow, Result };
+use serde::Deserialize;
 
 macro_rules! get_string_for_status {
     ($status:expr) => {
         match $status {
-            OnlineStatus::Offline => "не в сети",
-            OnlineStatus::Idle => "спит",
-            OnlineStatus::Invisible => "в невидимке",
-            OnlineStatus::Online => "в сети",
-            OnlineStatus::DoNotDisturb => "просит не беспокоить",
-            _ => "непонятно",
+            OnlineStatus::Offline => &LOCALIZATION.get().unwrap().offline,
+            OnlineStatus::Idle => &LOCALIZATION.get().unwrap().idle,
+            OnlineStatus::Invisible => &LOCALIZATION.get().unwrap().invisible,
+            OnlineStatus::Online => &LOCALIZATION.get().unwrap().online,
+            OnlineStatus::DoNotDisturb => &LOCALIZATION.get().unwrap().donotdisturb,
+            _ => &LOCALIZATION.get().unwrap().unknown,
         }
+    };
+}
+
+macro_rules! set_env_num {
+    ($var:expr) => {
+        let var_str = stringify!($var);
+        $var.set(
+            env::var(var_str)
+                .expect("Expected {var_str} in the environment")
+                .parse()
+                .expect("{var_str} not a number"),
+        )
+        .unwrap();
+    };
+}
+
+macro_rules! set_env_str {
+    ($var:expr) => {
+        let var_str = stringify!($var);
+        $var.set(env::var(var_str).expect("Expected {var_str} in the environment"))
+            .unwrap();
     };
 }
 
 static TARGET_GUILD: OnceLock<u64> = OnceLock::new();
 static OUTPUT_CHANNEL: OnceLock<u64> = OnceLock::new();
 static TARGET_USER: OnceLock<u64> = OnceLock::new();
+static TARGET_STEAMID32: OnceLock<u64> = OnceLock::new();
 static EMOJI_ID: OnceLock<u64> = OnceLock::new();
-static ACTIVITY_STRING: OnceLock<String> = OnceLock::new();
 static EMOJI_NAME: OnceLock<String> = OnceLock::new();
+static LOCALIZATION: OnceLock<Localization> = OnceLock::new();
+
+static HEROES: OnceLock<HashMap<i64, String>> = OnceLock::new();
+
+const MAIN_LOOP_INTERVAL: Duration = Duration::from_secs(60);
+
+#[derive(Debug, Deserialize)]
+struct Localization {
+    pub bot_activity: String,
+    pub plays: String,
+
+    pub won: String,
+    pub lost: String,
+    pub played_on: String,
+    pub with_score: String,
+    pub match_duration: String,
+    pub minutes: String,
+
+    pub target_name: String,
+    pub offline: String,
+    pub idle: String,
+    pub invisible: String,
+    pub online: String,
+    pub donotdisturb: String,
+    pub unknown: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(transparent)]
+struct Response<T> {
+    pub items: Vec<T>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Hero {
+    pub id: i64,
+    pub localized_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct MatchData {
+    pub match_id: i64,
+    pub player_slot: i64,
+    pub radiant_win: bool,
+    pub hero_id: i64,
+    pub duration: i64,
+    pub kills: i64,
+    pub deaths: i64,
+    pub assists: i64,
+}
+
+async fn set_heroes() -> Result<()> {
+    let body = reqwest::get("https://api.opendota.com/api/heroes")
+        .await?
+        .text()
+        .await?;
+    let mut heroes_hm: HashMap<i64, String> = HashMap::new();
+    let heroes: Response<Hero> = serde_json::from_str(&body)?;
+    for hero in heroes.items {
+        heroes_hm.insert(hero.id, hero.localized_name);
+    }
+    if HEROES.set(heroes_hm).is_err() {
+        return Err(anyhow!("Couldn't set HEROES"))
+    } 
+    Ok(())
+}
+
+async fn request_matches(url: &str) -> Result<Vec<MatchData>> {
+    let body = reqwest::get(url).await?.text().await?;
+    let response: Response<MatchData> = serde_json::from_str(&body)?;
+    Ok(response.items)
+}
 
 async fn main_loop(ctx: &Context) {
-    let mut interval = time::interval(Duration::from_secs(5));
-    let mut user: User = UserId::new(*TARGET_USER.get().unwrap())
-        .to_user(ctx.http())
-        .await
-        .expect("Can't get target user");
+    let mut interval = time::interval(MAIN_LOOP_INTERVAL);
+    let mut last_match_id = 0;
+    let locals = &LOCALIZATION.get().unwrap();
+    let matches_url = format!(
+        "https://api.opendota.com/api/players/{}/recentMatches",
+        &TARGET_STEAMID32.get().unwrap()
+    );
     loop {
-        match user.refresh(ctx.http()).await {
-            Ok(()) => (),
+        interval.tick().await;
+
+        if HEROES.get().is_none() {
+            if let Err(err) = set_heroes().await {
+                eprintln!("Error fetching heroes: {err}");
+                continue;
+            }
+        }
+
+        let matches = match request_matches(&matches_url).await {
+            Ok(matches) => matches,
             Err(err) => {
-                eprintln!("Can't refresh target user {err}");
-                interval.tick().await;
+                eprintln!("Couldn't fetch matches: {err}");
                 continue;
             }
         };
-        interval.tick().await;
+        let last = match matches.first() {
+            Some(last) => last,
+            None => {
+                eprintln!("Empty matches list");
+                continue;
+            }
+        };
+        if last.match_id == last_match_id {
+            continue;
+        }
+        last_match_id = last.match_id;
+
+        let result = if last.radiant_win == (last.player_slot < 5) {
+            &locals.won
+        } else {
+            &locals.lost
+        };
+
+        let mut message: CreateMessage = Default::default();
+        message = message.content(format!(
+"{target_name} {result} {played_on} {hero} {with_score} {kills}, {deaths}, {assists}. {match_duration} {minutes} {minutes_str}.",
+            target_name = locals.target_name,
+            result = result,
+            hero = HEROES.get().unwrap().get(&last.hero_id).unwrap(),
+            kills = last.kills,
+            deaths = last.deaths,
+            assists = last.assists,
+            minutes = last.duration / 60,
+            played_on = locals.played_on,
+            with_score = locals.with_score,
+            match_duration = locals.match_duration,
+            minutes_str = locals.minutes,
+        ));
+        message = message.tts(true);
+
+        if let Err(why) = ChannelId::new(*OUTPUT_CHANNEL.get().unwrap())
+            .send_message(ctx.http(), message)
+            .await
+        {
+            eprintln!("Error sending dota message: {why:?}");
+        }
     }
 }
 
@@ -55,7 +205,7 @@ impl EventHandler for Handler {
             let reaction = ReactionType::Custom {
                 animated: false,
                 id: EmojiId::new(*EMOJI_ID.get().unwrap()),
-                name: Some(EMOJI_NAME.get().unwrap().to_string()),
+                name: Some(EMOJI_NAME.get().unwrap().clone()),
             };
             if let Err(why) = msg.react(&ctx.http, reaction).await {
                 eprintln!("Error reacting to message: {why:?}");
@@ -64,20 +214,13 @@ impl EventHandler for Handler {
     }
 
     async fn presence_update(&self, ctx: Context, new_data: Presence) {
-        if new_data.guild_id != Some(GuildId::new(*TARGET_GUILD.get().unwrap())) {
+        if new_data.guild_id != Some(GuildId::new(*TARGET_GUILD.get().unwrap()))
+            || new_data.user.id != *TARGET_USER.get().unwrap()
+        {
             return;
         }
 
-        // Username is not received when user is offline, so requesting it
-        let user: Option<User> = match new_data.user.id.to_user(ctx.http()).await {
-            Ok(u) => Some(u),
-            Err(err) => {
-                eprintln!("Couldn't receive user: {err:?}");
-                None
-            }
-        };
-
-        let username: &str = user.as_ref().map_or("непонятно кто", |u| &u.name);
+        let username = &LOCALIZATION.get().unwrap().target_name;
 
         let mut message: CreateMessage = Default::default();
         let mut status: &str = get_string_for_status!(new_data.status);
@@ -96,7 +239,7 @@ impl EventHandler for Handler {
         });
 
         if new_data.activities.is_empty() {
-            message = message.content(format!("{} теперь {} {}", username, status, device));
+            message = message.content(format!("{} {}{}", username, status, device));
         } else {
             let activity = &new_data.activities[0];
 
@@ -121,15 +264,17 @@ impl EventHandler for Handler {
             }
 
             message = message.content(format!(
-                "{} {} {} и шпилит в {}\n{}\n{}\n{}",
+                "{} {}{} {} {}\n{}\n{}\n{}",
                 username,
                 status,
                 device,
+                &LOCALIZATION.get().unwrap().plays,
                 activity_name,
                 activity_details.as_deref().unwrap_or_default(),
                 large_text.as_deref().unwrap_or_default(),
                 small_text.as_deref().unwrap_or_default(),
             ));
+            message = message.tts(true);
         }
         if let Err(why) = ChannelId::new(*OUTPUT_CHANNEL.get().unwrap())
             .send_message(ctx.http(), message)
@@ -142,9 +287,11 @@ impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
         println!("{} is connected!", ready.user.name);
         let mut activity = ActivityData::custom("");
-        activity.state = Some(ACTIVITY_STRING.get().unwrap().to_string());
+        activity.state = Some(LOCALIZATION.get().unwrap().bot_activity.clone());
         ctx.set_activity(Some(activity));
-        // main_loop(&ctx).await
+        tokio::spawn(async move {
+            main_loop(&ctx).await;
+        });
     }
 }
 
@@ -154,44 +301,18 @@ async fn main() {
 
     let token = env::var("DISCORD_TOKEN").expect("Expected a token in the environment");
 
-    TARGET_GUILD
-        .set(
-            env::var("TARGET_GUILD")
-                .expect("Expected TARGET_GUILD in the environment")
-                .parse()
-                .expect("TARGET_GUILD not a number"),
-        )
-        .unwrap();
-    OUTPUT_CHANNEL
-        .set(
-            env::var("OUTPUT_CHANNEL")
-                .expect("Expected OUTPUT_CHANNEL in the environment")
-                .parse()
-                .expect("OUTPUT_CHANNEL not a number"),
-        )
-        .unwrap();
-    TARGET_USER
-        .set(
-            env::var("TARGET_USER")
-                .expect("Expected TARGET_USER in the environment")
-                .parse()
-                .expect("TARGET_USER not a number"),
-        )
-        .unwrap();
-    EMOJI_ID
-        .set(
-            env::var("EMOJI_ID")
-                .expect("Expected EMOJI_ID in the environment")
-                .parse()
-                .expect("EMOJI_ID not a number"),
-        )
-        .unwrap();
-    EMOJI_NAME
-        .set(env::var("EMOJI_NAME").expect("Expected EMOJI_NAME in the environment"))
-        .unwrap();
-    ACTIVITY_STRING
-        .set(env::var("ACTIVITY_STRING").expect("Expected ACTIVITY_STRING in the environment"))
-        .unwrap();
+    set_env_num!(TARGET_GUILD);
+    set_env_num!(TARGET_USER);
+    set_env_num!(TARGET_STEAMID32);
+    set_env_num!(EMOJI_ID);
+    set_env_str!(EMOJI_NAME);
+
+    let locals: Localization = serde_json::from_str(
+        &std::fs::read_to_string("localization.json")
+            .expect("localization.json file in the root folder"),
+    )
+    .unwrap_or_else(|err| panic!("Invalid localization.json: {err}"));
+    LOCALIZATION.set(locals).unwrap();
 
     let intents = GatewayIntents::GUILD_MESSAGES
         | GatewayIntents::DIRECT_MESSAGES
@@ -201,7 +322,7 @@ async fn main() {
     let mut client = Client::builder(&token, intents)
         .event_handler(Handler)
         .await
-        .expect("Err creating client");
+        .expect("Successfull client creation");
 
     if let Err(why) = client.start().await {
         eprintln!("Client error: {why:?}");
