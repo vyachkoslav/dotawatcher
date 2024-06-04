@@ -302,6 +302,7 @@ async fn main() {
     let token = env::var("DISCORD_TOKEN").expect("Expected a token in the environment");
 
     set_env_num!(TARGET_GUILD);
+    set_env_num!(OUTPUT_CHANNEL);
     set_env_num!(TARGET_USER);
     set_env_num!(TARGET_STEAMID32);
     set_env_num!(EMOJI_ID);
