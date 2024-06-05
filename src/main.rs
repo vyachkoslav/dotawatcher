@@ -227,6 +227,7 @@ impl EventHandler for Handler {
         let username = &LOCALIZATION.get().unwrap().target_name;
 
         let mut message: CreateMessage = Default::default();
+        message = message.tts(true);
         let mut status: &str = get_string_for_status!(new_data.status);
 
         let device = new_data.client_status.map_or("", |device| {
@@ -278,7 +279,6 @@ impl EventHandler for Handler {
                 large_text.as_deref().unwrap_or_default(),
                 small_text.as_deref().unwrap_or_default(),
             ));
-            message = message.tts(true);
         }
         if let Err(why) = ChannelId::new(*OUTPUT_CHANNEL.get().unwrap())
             .send_message(ctx.http(), message)
