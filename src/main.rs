@@ -172,7 +172,7 @@ async fn main_loop(ctx: &Context) {
 
         let mut message: CreateMessage = Default::default();
         message = message.content(format!(
-"{target_name} {result} {played_on} {hero} {with_score} {kills}, {deaths}, {assists}. {match_duration} {minutes} {minutes_str}.",
+"{target_name} {result}. {played_on} {hero} {with_score} {kills}, {deaths}, {assists}. {match_duration} {minutes} {minutes_str}.",
             target_name = locals.target_name,
             result = result,
             hero = HEROES.get().unwrap().get(&last.hero_id).unwrap(),
