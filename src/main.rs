@@ -79,6 +79,10 @@ struct Localization {
     pub online: String,
     pub donotdisturb: String,
     pub unknown: String,
+
+    pub using_phone: String,
+    pub using_browser: String,
+    pub using_computer: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -228,13 +232,13 @@ impl EventHandler for Handler {
         let device = new_data.client_status.map_or("", |device| {
             if let Some(s) = device.mobile {
                 status = get_string_for_status!(s);
-                "с телефона"
+                &LOCALIZATION.get().unwrap().using_phone
             } else if let Some(s) = device.web {
                 status = get_string_for_status!(s);
-                "с браузера"
+                &LOCALIZATION.get().unwrap().using_browser
             } else {
                 status = get_string_for_status!(new_data.status);
-                ""
+                &LOCALIZATION.get().unwrap().using_computer
             }
         });
 
