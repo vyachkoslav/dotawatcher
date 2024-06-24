@@ -9,6 +9,7 @@ use serenity::all::{
 };
 use serenity::async_trait;
 
+use tokio::sync::Mutex;
 use tokio::time::{ self, Duration };
 
 use anyhow::{ anyhow, Result };
@@ -132,6 +133,7 @@ async fn request_matches(url: &str) -> Result<Vec<MatchData>> {
 }
 
 async fn main_loop(ctx: &Context) {
+    println!("Dotawatcher enabled");
     let mut interval = time::interval(MAIN_LOOP_INTERVAL);
     let mut last_match_id = 0;
     let locals = &LOCALIZATION.get().unwrap();
@@ -164,6 +166,11 @@ async fn main_loop(ctx: &Context) {
             }
         };
         if last.match_id == last_match_id {
+            continue;
+        }
+
+        if last_match_id == 0 {
+            last_match_id = last.match_id;
             continue;
         }
         last_match_id = last.match_id;
@@ -200,7 +207,9 @@ async fn main_loop(ctx: &Context) {
     }
 }
 
-struct Handler;
+struct Handler {
+    dotawatcher_active: Mutex<bool>,
+}
 
 #[async_trait]
 impl EventHandler for Handler {
@@ -293,9 +302,14 @@ impl EventHandler for Handler {
         let mut activity = ActivityData::custom("");
         activity.state = Some(LOCALIZATION.get().unwrap().bot_activity.clone());
         ctx.set_activity(Some(activity));
-        tokio::spawn(async move {
-            main_loop(&ctx).await;
-        });
+
+        let mut dota_active = self.dotawatcher_active.lock().await;
+        if !*dota_active {
+            *dota_active = true;
+            tokio::spawn(async move {
+                main_loop(&ctx).await;
+            });
+        }
     }
 }
 
@@ -325,7 +339,7 @@ async fn main() {
         | GatewayIntents::GUILD_PRESENCES;
 
     let mut client = Client::builder(&token, intents)
-        .event_handler(Handler)
+        .event_handler(Handler { dotawatcher_active: Mutex::new(false), })
         .await
         .expect("Successfull client creation");
 
