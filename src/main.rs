@@ -1,18 +1,19 @@
 use std::collections::HashMap;
 use std::env;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use serenity::all::{
     ActivityData, ActivityType, CacheHttp, ChannelId, Client, Context, CreateMessage, EmojiId,
-    EventHandler, GatewayIntents, GuildId, Message, OnlineStatus, Presence, ReactionType, Ready,
-    UserId,
+    EventHandler, GatewayIntents, GuildId, Http, Message, OnlineStatus, Presence, ReactionType,
+    Ready, UserId,
 };
 use serenity::async_trait;
 
 use tokio::sync::Mutex;
-use tokio::time::{ self, Duration };
+use tokio::task::JoinHandle;
+use tokio::time::{self, Duration};
 
-use anyhow::{ anyhow, Result };
+use anyhow::{anyhow, Result};
 use serde::Deserialize;
 
 macro_rules! get_string_for_status {
@@ -49,6 +50,8 @@ macro_rules! set_env_str {
     };
 }
 
+static STEAM_REQUEST_URL: OnceLock<String> = OnceLock::new();
+
 static TARGET_GUILD: OnceLock<u64> = OnceLock::new();
 static OUTPUT_CHANNEL: OnceLock<u64> = OnceLock::new();
 static TARGET_USER: OnceLock<u64> = OnceLock::new();
@@ -59,7 +62,8 @@ static LOCALIZATION: OnceLock<Localization> = OnceLock::new();
 
 static HEROES: OnceLock<HashMap<i64, String>> = OnceLock::new();
 
-const MAIN_LOOP_INTERVAL: Duration = Duration::from_secs(60);
+const DOTA_LOOP_INTERVAL: Duration = Duration::from_secs(60);
+const STEAM_LOOP_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Deserialize)]
 struct Localization {
@@ -84,6 +88,8 @@ struct Localization {
     pub using_phone: String,
     pub using_browser: String,
     pub using_computer: String,
+
+    pub on_steam: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -110,6 +116,53 @@ struct MatchData {
     pub assists: i64,
 }
 
+#[derive(Debug, Deserialize)]
+struct SteamUserData {
+    pub personastate: i64,
+    pub gameextrainfo: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResponsePlayers {
+    pub players: Vec<SteamUserData>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename(deserialize = "response"))]
+struct SteamResponse {
+    pub response: ResponsePlayers,
+}
+
+#[derive(Debug, Deserialize)]
+struct PlayerState {
+    pub status: OnlineStatus,
+    pub game: Option<String>,
+}
+
+async fn get_steam_state() -> Result<PlayerState> {
+    let body = reqwest::get(STEAM_REQUEST_URL.get().unwrap())
+        .await?
+        .text()
+        .await?;
+    let mut response: SteamResponse = serde_json::from_str(&body)?;
+    if response.response.players.len() == 0 {
+        return Err(anyhow!("Can't find player with this ID"));
+    }
+    let data = response.response.players.remove(0);
+    let state = PlayerState {
+        status: match data.personastate {
+            0 => OnlineStatus::Offline,
+            1 => OnlineStatus::Online,
+            2 => OnlineStatus::DoNotDisturb,
+            3 => OnlineStatus::Idle,
+            _ => OnlineStatus::Offline,
+        },
+        game: data.gameextrainfo,
+    };
+
+    Ok(state)
+}
+
 async fn set_heroes() -> Result<()> {
     let body = reqwest::get("https://api.opendota.com/api/heroes")
         .await?
@@ -121,8 +174,8 @@ async fn set_heroes() -> Result<()> {
         heroes_hm.insert(hero.id, hero.localized_name);
     }
     if HEROES.set(heroes_hm).is_err() {
-        return Err(anyhow!("Couldn't set HEROES"))
-    } 
+        return Err(anyhow!("Couldn't set HEROES"));
+    }
     Ok(())
 }
 
@@ -132,9 +185,62 @@ async fn request_matches(url: &str) -> Result<Vec<MatchData>> {
     Ok(response.items)
 }
 
-async fn main_loop(ctx: &Context) {
-    println!("Dotawatcher enabled");
-    let mut interval = time::interval(MAIN_LOOP_INTERVAL);
+async fn steamwatcher_loop(http: &Http, current_state: &Mutex<PlayerState>) {
+    println!("Steam watcher enabled");
+    let mut interval = time::interval(STEAM_LOOP_INTERVAL);
+
+    loop {
+        interval.tick().await;
+        let state = get_steam_state().await;
+        if let Ok(state) = state {
+            let mut cur_state = current_state.lock().await;
+            let game_state_eq = (*cur_state).game == state.game;
+            let no_new_status = (*cur_state).status != OnlineStatus::Offline
+                || state.status == OnlineStatus::Offline;
+            if game_state_eq && no_new_status {
+                continue;
+            }
+            let status: &str = get_string_for_status!(state.status);
+            let content: String;
+            if game_state_eq {
+                content = format!(
+                    "{} {} {}",
+                    &LOCALIZATION.get().unwrap().target_name,
+                    status,
+                    &LOCALIZATION.get().unwrap().on_steam,
+                );
+            } else {
+                content = format!(
+                    "{} {} {} {} {}",
+                    &LOCALIZATION.get().unwrap().target_name,
+                    status,
+                    &LOCALIZATION.get().unwrap().plays,
+                    state.game.as_deref().unwrap_or_default(),
+                    &LOCALIZATION.get().unwrap().on_steam,
+                );
+                (*cur_state).game = state.game;
+            }
+            if !no_new_status {
+                (*cur_state).status = state.status;
+            }
+            drop(cur_state);
+
+            let mut message: CreateMessage = Default::default();
+            message = message.content(content);
+            message = message.tts(true);
+
+            if let Err(why) = ChannelId::new(*OUTPUT_CHANNEL.get().unwrap())
+                .send_message(http, message)
+                .await
+            {
+                eprintln!("Error sending Steam activity message: {why:?}");
+            }
+        }
+    }
+}
+async fn dotawatcher_loop(http: &Http) {
+    println!("Dota watcher enabled");
+    let mut interval = time::interval(DOTA_LOOP_INTERVAL);
     let mut last_match_id = 0;
     let locals = &LOCALIZATION.get().unwrap();
     let matches_url = format!(
@@ -181,9 +287,8 @@ async fn main_loop(ctx: &Context) {
             &locals.lost
         };
 
-        let mut message: CreateMessage = Default::default();
-        message = message.content(format!(
-"{target_name} {result}. {played_on} {hero} {with_score} {kills}, {deaths}, {assists}. {match_duration} {minutes} {minutes_str}.",
+        let content = format!(
+            "{target_name} {result}. {played_on} {hero} {with_score} {kills}, {deaths}, {assists}. {match_duration} {minutes} {minutes_str}.",
             target_name = locals.target_name,
             result = result,
             hero = HEROES.get().unwrap().get(&last.hero_id).unwrap(),
@@ -195,11 +300,13 @@ async fn main_loop(ctx: &Context) {
             with_score = locals.with_score,
             match_duration = locals.match_duration,
             minutes_str = locals.minutes,
-        ));
+        );
+        let mut message: CreateMessage = Default::default();
+        message = message.content(content);
         message = message.tts(true);
 
         if let Err(why) = ChannelId::new(*OUTPUT_CHANNEL.get().unwrap())
-            .send_message(ctx.http(), message)
+            .send_message(http, message)
             .await
         {
             eprintln!("Error sending dota message: {why:?}");
@@ -208,7 +315,10 @@ async fn main_loop(ctx: &Context) {
 }
 
 struct Handler {
-    dotawatcher_active: Mutex<bool>,
+    dotawatcher_thread: Mutex<Option<JoinHandle<()>>>,
+    steamwatcher_thread: Mutex<Option<JoinHandle<()>>>,
+    last_message: Mutex<Option<String>>,
+    current_state: Arc<Mutex<PlayerState>>,
 }
 
 #[async_trait]
@@ -226,7 +336,7 @@ impl EventHandler for Handler {
         }
     }
 
-    async fn presence_update(&self, ctx: Context, new_data: Presence) {
+    async fn presence_update(&self, ctx: Context, mut new_data: Presence) {
         if new_data.guild_id != Some(GuildId::new(*TARGET_GUILD.get().unwrap()))
             || new_data.user.id != *TARGET_USER.get().unwrap()
         {
@@ -237,6 +347,9 @@ impl EventHandler for Handler {
 
         let mut message: CreateMessage = Default::default();
         message = message.tts(true);
+
+        let content: String;
+
         let mut status: &str = get_string_for_status!(new_data.status);
 
         let device = new_data.client_status.map_or("", |device| {
@@ -252,19 +365,26 @@ impl EventHandler for Handler {
             }
         });
 
+        let mut state = self.current_state.lock().await;
+        (*state).status = new_data.status;
         if new_data.activities.is_empty() {
-            message = message.content(format!("{} {}{}", username, status, device));
+            content = format!("{} {}{}", username, status, device);
+            (*state).game = None;
         } else {
-            let activity = &new_data.activities[0];
+            let activity = new_data.activities.remove(0);
 
-            let activity_name: &str;
-            let activity_details: &Option<String>;
+            let activity_name: Option<String>;
+            let activity_details: Option<String>;
             if activity.kind == ActivityType::Custom {
-                activity_name = activity.details.as_deref().unwrap_or_default();
-                activity_details = &None;
+                activity_name = activity.details;
+                activity_details = None;
             } else {
-                activity_name = &activity.name;
-                activity_details = &activity.details;
+                activity_name = Some(activity.name);
+                activity_details = activity.details;
+            }
+
+            if activity_name == (*state).game {
+                return;
             }
 
             let large_text: &Option<String>;
@@ -277,24 +397,35 @@ impl EventHandler for Handler {
                 small_text = &None;
             }
 
-            message = message.content(format!(
+            content = format!(
                 "{} {}{} {} {}\n{}\n{}\n{}",
                 username,
                 status,
                 device,
                 &LOCALIZATION.get().unwrap().plays,
-                activity_name,
+                activity_name.as_deref().unwrap_or_default(),
                 activity_details.as_deref().unwrap_or_default(),
                 large_text.as_deref().unwrap_or_default(),
                 small_text.as_deref().unwrap_or_default(),
-            ));
+            );
+            (*state).game = activity_name;
         }
+        drop(state);
+
+        let mut last = self.last_message.lock().await;
+        if Some(&content) == (*last).as_ref() {
+            return;
+        }
+
+        message = message.content(&content);
+
         if let Err(why) = ChannelId::new(*OUTPUT_CHANNEL.get().unwrap())
             .send_message(ctx.http(), message)
             .await
         {
             eprintln!("Error sending activity message: {why:?}");
         }
+        *last = Some(content);
     }
 
     async fn ready(&self, ctx: Context, ready: Ready) {
@@ -303,21 +434,32 @@ impl EventHandler for Handler {
         activity.state = Some(LOCALIZATION.get().unwrap().bot_activity.clone());
         ctx.set_activity(Some(activity));
 
-        let mut dota_active = self.dotawatcher_active.lock().await;
-        if !*dota_active {
-            *dota_active = true;
-            tokio::spawn(async move {
-                main_loop(&ctx).await;
-            });
+        let mut dotawatcher_thread = self.dotawatcher_thread.lock().await;
+        if let Some(thread) = &*dotawatcher_thread {
+            thread.abort();
         }
+        let mut steamwatcher_thread = self.steamwatcher_thread.lock().await;
+        if let Some(thread) = &*steamwatcher_thread {
+            thread.abort();
+        }
+
+        let http = ctx.http.clone();
+        *dotawatcher_thread = Some(tokio::spawn(async move {
+            dotawatcher_loop(&http).await;
+        }));
+
+        let http = ctx.http.clone();
+        let current_state = self.current_state.clone();
+        *steamwatcher_thread = Some(tokio::spawn(async move {
+            steamwatcher_loop(&http, &current_state).await;
+        }));
     }
 }
 
 #[tokio::main]
 async fn main() {
     dotenv::dotenv().ok();
-
-    let token = env::var("DISCORD_TOKEN").expect("Expected a token in the environment");
+    let token = env::var("DISCORD_TOKEN").expect("Expected DISCORD_TOKEN in the environment");
 
     set_env_num!(TARGET_GUILD);
     set_env_num!(OUTPUT_CHANNEL);
@@ -326,6 +468,11 @@ async fn main() {
     set_env_num!(EMOJI_ID);
     set_env_str!(EMOJI_NAME);
 
+    let _ = STEAM_REQUEST_URL.set(format!(
+        "https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/?key={}&steamids={}",
+        env::var("STEAM_TOKEN").expect("Expected STEAM_TOKEN in the environment"),
+        env::var("TARGET_STEAMID64").expect("Expected TARGET_STEAMID64 in the environment")
+    ));
     let locals: Localization = serde_json::from_str(
         &std::fs::read_to_string("localization.json")
             .expect("localization.json file in the root folder"),
@@ -339,7 +486,15 @@ async fn main() {
         | GatewayIntents::GUILD_PRESENCES;
 
     let mut client = Client::builder(&token, intents)
-        .event_handler(Handler { dotawatcher_active: Mutex::new(false), })
+        .event_handler(Handler {
+            dotawatcher_thread: Mutex::new(None),
+            steamwatcher_thread: Mutex::new(None),
+            last_message: Mutex::new(None),
+            current_state: Arc::new(Mutex::new(PlayerState {
+                game: None,
+                status: OnlineStatus::Offline,
+            })),
+        })
         .await
         .expect("Successfull client creation");
 
