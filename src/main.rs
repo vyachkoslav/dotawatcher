@@ -194,7 +194,7 @@ async fn steamwatcher_loop(http: &Http, current_state: &Mutex<PlayerState>) {
         let state = get_steam_state().await;
         if let Ok(state) = state {
             let mut cur_state = current_state.lock().await;
-            let game_state_eq = (*cur_state).game == state.game;
+            let game_state_eq = (*cur_state).game == state.game || state.game.is_none();
             let no_new_status = (*cur_state).status != OnlineStatus::Offline
                 || state.status == OnlineStatus::Offline;
             if game_state_eq && no_new_status {
@@ -218,8 +218,8 @@ async fn steamwatcher_loop(http: &Http, current_state: &Mutex<PlayerState>) {
                     state.game.as_deref().unwrap_or_default(),
                     &LOCALIZATION.get().unwrap().on_steam,
                 );
-                (*cur_state).game = state.game;
             }
+            (*cur_state).game = state.game;
             if !no_new_status {
                 (*cur_state).status = state.status;
             }
